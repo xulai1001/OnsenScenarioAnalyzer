@@ -25,13 +25,15 @@ namespace OnsenScenarioAnalyzer
 
         // Link 角色 ID（通过角色 ID 匹配，自动覆盖该角色的所有支援卡）
         // 东海帝王 - 砂质地层 +10%
-        private static readonly int[] TOKAI_TEIO_CHARA_IDS = [1003];
-        // 创升 - 土质地层 +10%
-        private static readonly int[] CHUANG_SHENG_CHARA_IDS = [1080];
-        // 美浦波旁 - 土质地层 +10%
-        private static readonly int[] MEJIRO_BOURBON_CHARA_IDS = [1026];
-        // 奇锐骏 - 岩石地层 +10%
-        private static readonly int[] KITASAN_BLACK_CHARA_IDS = [1100];
+        private static readonly int[] SAND_CHARS = [1003];
+        // 创升, 波旁 - 土质地层 +10%
+        private static readonly int[] DIRT_CHARS = [1026, 1080];
+        // 奇锐骏/火山 - 岩石地层 +10%
+        private static readonly int[] ROCK_CHARS = [1099, 1100];
+        // 友人角色ID
+        private static readonly int FRIEND_CHARA_ID = 9050;
+        // 超回复概率
+        private static readonly int[] SUPER_PROBS = [0, 10, 20, 30, 40, 100];
 
         public static int GetCommandInfoStage_legend(SingleModeCheckEventResponse @event)
         {
@@ -93,45 +95,37 @@ namespace OnsenScenarioAnalyzer
         {
             var stratumTypeName = stratumType switch
             {
-                1 => "砂质",
-                2 => "土质",
-                3 => "岩石",
+                1 => "砂",
+                2 => "土",
+                3 => "岩",
                 _ => "未知"
             };
 
             int bonus = 0;
-            string linkCharacter = "";
+            //string linkCharacter = "";
 
             switch (stratumType)
             {
                 case 1:  // 砂质 - 东海帝王
-                    if (HasLinkCharacterOrCard(turn, TOKAI_TEIO_CHARA_IDS))
+                    if (HasLinkCharacterOrCard(turn, SAND_CHARS))
                     {
                         bonus = 10;
-                        linkCharacter = "东海帝王";
                     }
                     break;
                 case 2:  // 土质 - 创升或美浦波旁
-                    if (HasLinkCharacterOrCard(turn, CHUANG_SHENG_CHARA_IDS))
+                    if (HasLinkCharacterOrCard(turn, DIRT_CHARS))
                     {
                         bonus = 10;
-                        linkCharacter = "创升";
-                    }
-                    else if (HasLinkCharacterOrCard(turn, MEJIRO_BOURBON_CHARA_IDS))
-                    {
-                        bonus = 10;
-                        linkCharacter = "美浦波旁";
                     }
                     break;
-                case 3:  // 岩石 - 奇锐骏
-                    if (HasLinkCharacterOrCard(turn, KITASAN_BLACK_CHARA_IDS))
+                case 3:  // 岩石 - 奇锐骏,火山
+                    if (HasLinkCharacterOrCard(turn, ROCK_CHARS))
                     {
                         bonus = 10;
-                        linkCharacter = "奇锐骏";
                     }
                     break;
             }
-
+            /*
             if (showDebug)
             {
                 if (bonus > 0)
@@ -143,7 +137,7 @@ namespace OnsenScenarioAnalyzer
                     AnsiConsole.MarkupLine($"[grey]✗ Link 未触发[/]: {stratumTypeName}地层");
                 }
             }
-
+            */
             return bonus;
         }
 
@@ -429,14 +423,54 @@ namespace OnsenScenarioAnalyzer
             return predictedTurns;
         }
 
+        public static int GetFriendRarity(TurnInfo turn)
+        {
+            foreach (var supportCardId in turn.SupportCards.Values)
+            {
+                var charaId = Database.Names.GetSupportCard(supportCardId).CharaId;
+                var rarity = supportCardId / 10000;
+                if (charaId == FRIEND_CHARA_ID) return rarity;
+            }
+            return 0;
+        }
 
+        public static double CalculateSuperProb(TurnInfo turn, int vital)
+        {
+            var threshold = 42.5;
+            if (GetFriendRarity(turn) == 0) threshold = 50.0;
+            var old_rank = (int)Math.Max(Math.Min(Math.Floor((double)EventLogger.vitalSpent / threshold), 5), 0);
+            var new_rank = (int)Math.Max(Math.Min(Math.Floor((double)(EventLogger.vitalSpent + vital) / threshold), 5), 0);
+            if (new_rank > old_rank)
+            {
+                return (double)SUPER_PROBS[new_rank] / 100.0;
+            }
+            else
+            {
+                return (double)SUPER_PROBS[new_rank] / 400.0;
+            }
+        }
+
+        public static void SaveSuperResult(TurnInfo turn, int lastVital, int currentVital)
+        {
+            var line = $"{turn.Turn}, {GetFriendRarity(turn)}, {lastVital}, {currentVital}\n";
+            var path = Path.Combine([
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "UmamusumeResponseAnalyzer",
+                "PluginData",
+                "OnsenScenarioAnalyzer",
+                "super.csv"
+            ]);
+            File.AppendAllText(path, line);
+        }
 
         // 当前生效的温泉buff是否为超回复
         public static bool isCurrentBuffSuper = false;
         // 上次的温泉buff情况
         public static SingleModeOnsenBathingInfo lastBathing = new();
-        // 上次的事件数量
+        // 上次的事件数
         public static int lastEventCount = 0;
+        // 上次的体力消耗
+        public static int lastVitalSpent = 0;
         // 给超回复的事件ID
         public static int[] superEvents = { 809050011, 809050012, 809050013, 809050014, 809050015 };
         public static void ParseOnsenCommandInfo(SingleModeCheckEventResponse @event)
@@ -496,6 +530,7 @@ namespace OnsenScenarioAnalyzer
                 EventLogger.IsStart = true;
                 isCurrentBuffSuper = false;
                 lastEventCount = 0;
+                lastVitalSpent = 0;
             }
 
             // 统计上回合事件
@@ -511,29 +546,34 @@ namespace OnsenScenarioAnalyzer
                 // 更新跟踪状态
                 if (lastBathing.superior_state == 0 && bathing.superior_state > 0)
                 {
-                    EventLogger.captureVitalSpending = false;
                     if (lastEvents.Any(x => superEvents.Contains(x)))
                     {
                         AnsiConsole.MarkupLine("[magenta]友人提供超回复[/]");
                     }
                     else
                     {
-                        AnsiConsole.MarkupLine("[magenta]触发超回复[/]");
-                        EventLogger.vitalSpent = 0;
-                    }                    
+                        AnsiConsole.MarkupLine($"[magenta]触发超回复. 体力消耗: {lastVitalSpent} -> {EventLogger.vitalSpent}[/]");
+                        SaveSuperResult(turn, lastVitalSpent, EventLogger.vitalSpent);
+                    }
+                    // 无论怎么触发的超回复都重置体力计数
+                    EventLogger.captureVitalSpending = false;
+                    EventLogger.vitalSpent = 0;
                 }
                 if (lastBathing.onsen_effect_remain_count == 0 && bathing.onsen_effect_remain_count == 2)
                 {
                     AnsiConsole.MarkupLine("[magenta]使用温泉Buff[/]");
-                    if (lastBathing.superior_state > 0) isCurrentBuffSuper = true;
+                    if (lastBathing.superior_state > 0)
+                    {
+                        isCurrentBuffSuper = true;
+                        EventLogger.captureVitalSpending = true;
+                    }
                 }
                 if (isCurrentBuffSuper && bathing.onsen_effect_remain_count == 0 && bathing.superior_state == 0)
                 {
-                    AnsiConsole.MarkupLine("[magenta]超回复Buff结束，开始记录体力消耗[/]");
-                    isCurrentBuffSuper = false;
-                    EventLogger.captureVitalSpending = true;
+                    isCurrentBuffSuper = false;   
                 }
                 lastBathing = bathing;
+                lastVitalSpent = EventLogger.vitalSpent;
 
                 // 显示当前状态
                 layout["温泉券"].Update(new Panel($"[cyan]温泉券: {bathing.ticket_num} / 3[/]").Expand());
@@ -545,10 +585,7 @@ namespace OnsenScenarioAnalyzer
                 {
                     layout["温泉Buff"].Update(new Panel($"温泉Buff未生效").Expand());
                 }
-                if (isCurrentBuffSuper) {
-                    layout["超回复"].Update(new Panel($"[lightgreen]超回复生效中[/]").Expand());
-                }
-                else if (bathing.superior_state > 0)
+                if (bathing.superior_state > 0)
                 {
                     layout["超回复"].Update(new Panel($"[green]必定超回复[/]").Expand());
                 }
@@ -770,6 +807,8 @@ namespace OnsenScenarioAnalyzer
                     table.AddRow(new Rule());
 
                     var afterVital = trainStats[command.TrainIndex - 1].VitalGain + turn.Vital;
+                    // 计算不对，调整中
+                   // var superProb = bathing.superior_state > 0 ? 0 : CalculateSuperProb(turn, -trainStats[command.TrainIndex - 1].VitalGain);
                     table.AddRow(afterVital switch
                     {
                         < 30 => $"{I18N_Vital}:[red]{afterVital}[/]/{turn.MaxVital}",
@@ -801,6 +840,10 @@ namespace OnsenScenarioAnalyzer
                     // 显示挖掘信息
                     table.AddRow($"Lv{command.TrainLevel} | 挖: {gain}");
                     table.AddRow($"计算值: {calculatedDigAmount}");
+                   // if (superProb > 0)
+                   // {
+                   //     table.AddRow($"超回复: {Math.Round(superProb * 1000) / 10}%");
+                   // }
                     table.AddRow(new Rule());
 
                     var stats = trainStats[command.TrainIndex - 1];
@@ -870,7 +913,7 @@ namespace OnsenScenarioAnalyzer
                 if (turn.Turn >= 72)
                 {
                     // URA 阶段不再显示预测，显示提示信息
-                    exTable.AddRow(new Markup("[grey]当前已处在URA阶段，温泉挖掘周期结束[/]"));
+                    exTable.AddRow(new Markup("挖掘结束"));
                 }
                 else
                 {
@@ -880,10 +923,10 @@ namespace OnsenScenarioAnalyzer
                         // 根据预测结果添加颜色标识
                         var predictionMarkup = predictedTurns switch
                         {
-                            <= 3 => $"[green]大约剩余{predictedTurns}回合挖完当前温泉[/]",  // 绿色（≤3回合）
-                            <= 6 => $"[yellow]大约剩余{predictedTurns}回合挖完当前温泉[/]",  // 黄色（4-6回合）
-                            <= 10 => $"[darkorange]大约剩余{predictedTurns}回合挖完当前温泉[/]",  // 橙色（7-10回合）
-                            _ => $"[red]大约剩余{predictedTurns}回合挖完当前温泉[/]"  // 红色（>10回合）
+                            <= 3 => $"[green]还需 {predictedTurns} 回合挖完[/]",  // 绿色（≤3回合）
+                            <= 6 => $"[yellow]还需 {predictedTurns} 回合挖完[/]",  // 黄色（4-6回合）
+                            <= 10 => $"[darkorange]还需 {predictedTurns} 回合挖完[/]",  // 橙色（7-10回合）
+                            _ => $"[red]还需 {predictedTurns} 回合挖完[/]"  // 红色（>10回合）
                         };
                         exTable.AddRow(new Markup(predictionMarkup));
                     }
